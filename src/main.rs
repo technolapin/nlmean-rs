@@ -72,6 +72,11 @@ impl Image
         Ok(Self::from(image::open(name)?))
     }
 
+    fn empty(w: usize, h: usize) -> Self
+    {
+        Self(Array2::default((h, w)))
+    }
+    
     fn save(&self, name: &str) -> Result<(), Error>
     {
         let w = self.w();
@@ -165,13 +170,40 @@ impl Image
         let gaussian = Normal::new(0f32, sigma)?;
         Ok(Self(self.0.map(|x| x + gaussian.sample(&mut rng))))
     }
+
+    fn crop(&self, x: usize, y: usize, w: usize, h: usize) -> Self
+    {
+        let xs = (x..(x+w)).collect::<Vec<_>>();
+        let ys = (y..(y+h)).collect::<Vec<_>>();
+        Self(self.0.select(Axis(0), ys.as_slice()).select(Axis(1), xs.as_slice()))
+    }
+
+    fn hyper_sample(&self, scale: usize) -> Self
+    {
+        let mut out = Self::empty(self.w()*scale, self.h()*scale);
+        for i in 0..self.w()
+        {
+            for j in 0..self.h()
+            {
+                let val = self.get(i as isize, j as isize);
+                for di in 0..scale
+                {
+                    for dj in 0..scale
+                    {
+                        out.0[[j*scale+dj, i*scale+di]] = val;
+                    }
+                }
+            }
+        }
+        out
+    }
     
 }
 
 
 fn range2d(istart: isize, jstart: isize, iend: isize, jend: isize) -> Vec<(isize, isize)>
 {
-    (istart..iend).map(move |i| (jstart..jend).map(move |j| (i, j)))
+    (jstart..jend).map(move |j| (istart..iend).map(move |i| (i, j)))
         .flatten()
         
         .collect::<Vec<_>>()
@@ -183,14 +215,30 @@ fn range2d(istart: isize, jstart: isize, iend: isize, jend: isize) -> Vec<(isize
 fn main() -> Result<(), Error>
 {
     let dist_radius = 8;
-    let radius = 1;
+    let radius = 3;
 
     let tau = 0.05;
 
+/*
+    let w = 3;
+    let h = 3;
+    let z = 1;
+    let n = w*h;
+    let m = n*z;
+    let num = (0..m).collect::<Vec<_>>();
+    let test = Array3::from_shape_vec((h, w, z), num)?;
+    println!("{:?}", test);
+    let reshaped = test.into_shape((n, z))?;
+    println!("{:?}", reshaped);
+    let rereshaped = reshaped.into_shape((h, w, z))?;
 
-
-
-    let img_ref = Image::new("images/ricardo_power.png")?;
+    println!("{:?}", rereshaped);
+    return Ok(());
+*/
+    let img_ref = Image::new("images/ricardo_power.png")?
+        .crop(250, 86, 150, 100)
+        ;
+    //let img_ref = Image::new("images/half.png")?;
 
     let img = img_ref.gaussian_noise(0.05)?;
 
@@ -242,11 +290,6 @@ fn main() -> Result<(), Error>
 
     println!("Subspace dim={}", dim);
     let (vals, vecs): (Vec<_>, Vec<_>) = eig_tuples.into_iter().take(dim).unzip();
-    println!("Sorted eigen values and vecs");
-    for (val, vec) in vals.iter().zip(vecs.iter())
-    {
-        println!("{:?}     |     {:?}", val, vec);
-    }
 
     let subspace_raw = vecs.iter().map(|vec| vec.iter()).flatten().cloned().collect::<Vec<f32>>();
     let subspace = Array2::from_shape_vec((dim, diam*diam), subspace_raw)?;
@@ -261,28 +304,73 @@ fn main() -> Result<(), Error>
 
     let projection_reshaped = projection.into_shape((img.h(), img.w(), dim))?;
     
+    
+    for i in 0..dim
+    {
+        let layer = projection_reshaped.select(Axis(2), &[i]).into_shape((img.h(), img.w()))?;
+        Image(layer).save(&format!("layer{}.png", i));
+    }
+
+    
     println!("Projection reshaped into {:?}", projection_reshaped.shape());
 
+    let pixel_process = |i0, j0|
+    {
+        let patch = projection_reshaped.select(Axis(0), &[j0]).select(Axis(1), &[i0]);
+        let x0 = i0.max(dist_radius) - dist_radius;
+        let y0 = j0.max(dist_radius) - dist_radius;
 
+        let x1 = (i0+dist_radius+1).min(img.w());
+        let y1 = (j0+dist_radius+1).min(img.h());
+        
+        let x = (x0..x1).collect::<Vec<_>>();
+        let y = (y0..y1).collect::<Vec<_>>();
+        let selection = projection_reshaped.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice())
+            - patch.broadcast((y.len(), x.len(), dim)).unwrap();
+
+        let dist = (selection.fold_axis(Axis(2), 0f32, |sum, x| sum+x*x) / ((diam*diam) as f32));
+        let prekernel = dist.map(|x| (-x/(2.0*tau*tau)).exp());
+        let norm = prekernel.sum();
+        let kernel = prekernel/norm;
+
+        let im_selec = img.0.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice());
+        let pix = (kernel.clone()*im_selec).sum(); 
+        (dist, kernel, pix)
+        
+    };
     
     let denoized = Image(Array2::from_shape_fn(
         (img.h(), img.w()),
         |(j0, i0)|
         {
-            let patch = projection_reshaped.select(Axis(0), &[j0]).select(Axis(1), &[i0]);
-            let x = ((0.max((i0 as isize - dist_radius) as usize))..img.w().min((i0 as isize+dist_radius+1) as usize)).collect::<Vec<_>>();
-            let y = ((0.max((j0 as isize - dist_radius) as usize))..img.h().min((j0 as isize+dist_radius+1) as usize)).collect::<Vec<_>>();
-            let selection = projection_reshaped.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice())
-                - patch.broadcast((y.len(), x.len(), dim)).unwrap();
-            let dist = selection.fold_axis(Axis(2), 0f32, |sum, x| sum+x*x)/ ((diam*diam) as f32);
-            let prekernel = dist.map(|x| (-x/(2.0*tau*tau)).exp());
-            let norm = prekernel.sum();
-            let kernel = prekernel/norm;
-            let im_selec = img.0.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice());
-            (kernel*im_selec).sum()
+            pixel_process(i0, j0).2
         }
-   ));
+    ));
 
+
+    let dist_sum = Image(Array2::from_shape_fn(
+        (img.h(), img.w()),
+        |(j0, i0)|
+        {
+            pixel_process(i0, j0).0.sum()/( (diam*diam) as f32)
+        }
+    ));
+
+    dist_sum.hyper_sample(8).save("dist_sum.png");
+    
+    for i in 0..img.w()
+    {
+        for j in 0..img.h()
+        {
+            let (dist, ker, pix) = pixel_process(i, j);
+            /*println!("dist ker {} {}", i, j);
+            println!("{:?}", dist);
+            println!("{:?}", ker);
+             */
+            Image(dist).save(&format!("test/dist_i{}j{}.png", i, j));
+            Image(ker).save(&format!("test/ker_i{}j{}.png", i, j));
+        }
+    }
     println!("{:?}", denoized);
     println!("OUTPUT SHAPE {:?}", denoized.0.shape());
 
