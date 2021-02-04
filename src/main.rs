@@ -1,15 +1,13 @@
 use image::{ImageBuffer};
-use image::{Rgb, Rgba, Luma, Bgr, Bgra, LumaA, Pixel, ColorType};
+use image::{Luma};
 
-use ndarray::{Array2, Array1, arr2, arr1, ArrayView, ArrayBase, ViewRepr, Axis};
-use ndarray_linalg::eig;
-use rand_distr::{Distribution, Normal, NormalError};
-use rand::thread_rng;
-use rand::{RngCore, rngs::ThreadRng};
-use ndarray::*;
+use ndarray::{Array2, Axis};
+use rand_distr::{Distribution, Normal};
 use ndarray_linalg::*;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 
-
+type float = f64;
 
 #[derive(Debug)]
 struct Error(String);
@@ -41,29 +39,29 @@ impl_error_from!(rand_distr::NormalError);
 
 
 #[derive(Debug, Clone)]
-struct Image(Array2<f32>);
+struct Image(Array2<float>);
 impl Image
 {
     fn from(img: image::DynamicImage) -> Self
     {
-        let img = img.to_luma();
+        let img = img.to_luma8();
         let w = img.width();
         let h = img.height();
 
-        let mut mat = Array2::<f32>::zeros((h as usize, w as usize));            
+        let mut mat = Array2::<float>::zeros((h as usize, w as usize));            
 
         for i in 0..w
         {
             for j in 0..h
             {
                 let image::Luma([v]) = img.get_pixel(i, j);
-                mat[[j as usize, i as usize]] = ((*v) as f32)/255.0;
+                mat[[j as usize, i as usize]] = ((*v) as float)/255.0;
             }
         }
         Self(mat)
     }
 
-    fn from_mat(mat: Array2<f32>) -> Self
+    fn from_mat(mat: Array2<float>) -> Self
     {
         Self(mat)
     }
@@ -117,7 +115,7 @@ impl Image
     If the out of bound is too great (more than the width or height of the image), this method panics.
     This is not a problem since the patches will not have a radius equal or supperior to the dimensions of the image.
      */
-    fn get(&self, i: isize, j: isize) -> f32
+    fn get(&self, i: isize, j: isize) -> float
     {
         let (i, j) = ( i.max(-i).min(2*self.w() as isize -1 - i) as usize,
                        j.max(-j).min(2*self.h() as isize -1 - j) as usize);
@@ -134,7 +132,7 @@ impl Image
         (i % self.w(), i / self.w())
     }        
     
-    fn patches(&self, radius: usize) -> Array2<f32>
+    fn patches(&self, radius: usize) -> Array2<float>
     {
         let r = radius as isize;
 
@@ -155,19 +153,20 @@ impl Image
         Array2::from_shape_vec(dim_patches_mat, v).unwrap()
         
     }
-    fn snr(&self, reference: &Image) -> f32
+    fn snr(&self, reference: &Image) -> float
     {
-        let dist = (self.0.clone() - reference.0.clone()).fold(0f32, |sum, x| x*x).sqrt();
-        let norm = self.0.fold(0f32, |sum, x| x*x).sqrt();
+        let pow_noise = (self.0.clone() - reference.0.clone()).map(|x| x*x).sum().sqrt();
+        let pow_signal = reference.0.map(|x| x*x).sum();
 
-        return 20.0*(norm/dist).log10();
+        //println!("POW NOISE {}     POW SIGNAL {}", pow_noise, pow_signal).sqrt();
+        return 20.0*(pow_signal/pow_noise).log10();
         
     }
 
-    fn gaussian_noise(&self, sigma: f32) -> Result<Self, Error>
+    fn gaussian_noise(&self, sigma: float) -> Result<Self, Error>
     {
         let mut rng = rand::thread_rng();
-        let gaussian = Normal::new(0f32, sigma)?;
+        let gaussian = Normal::new(0., sigma)?;
         Ok(Self(self.0.map(|x| x + gaussian.sample(&mut rng))))
     }
 
@@ -197,6 +196,36 @@ impl Image
         }
         out
     }
+
+    /**
+    concatenate at the right
+    panics if sizes are not compatibles
+     */
+    fn concat(&self, other: &Self) -> Self
+    {
+        // the ndarray::concatenate function will be available in the next version
+        // for now I'll just improvise
+        assert_eq!(self.h(), other.h());
+        let (w, h) = (self.w()+other.w(), self.h());
+        let mut new = Self::empty(w, h);
+
+        for i in 0..self.w()
+        {
+            for j in 0..h
+            {
+                new.0[[j, i]] = self.0[[j, i]];
+            }
+        }
+        for i in self.w()..w
+        {
+            for j in 0..h
+            {
+                new.0[[j, i]] = other.0[[j, i-self.w()]];
+            }
+        }
+
+        new
+    }
     
 }
 
@@ -210,72 +239,46 @@ fn range2d(istart: isize, jstart: isize, iend: isize, jend: isize) -> Vec<(isize
 }
 
 
-
-
-fn main() -> Result<(), Error>
+fn nlmean(img_noisy: &Image, img_ref: &Image) -> Result<Image, Error>
 {
-    let dist_radius = 8;
-    let radius = 3;
-
-    let tau = 0.05;
-
-/*
-    let w = 3;
-    let h = 3;
-    let z = 1;
-    let n = w*h;
-    let m = n*z;
-    let num = (0..m).collect::<Vec<_>>();
-    let test = Array3::from_shape_vec((h, w, z), num)?;
-    println!("{:?}", test);
-    let reshaped = test.into_shape((n, z))?;
-    println!("{:?}", reshaped);
-    let rereshaped = reshaped.into_shape((h, w, z))?;
-
-    println!("{:?}", rereshaped);
-    return Ok(());
-*/
-    let img_ref = Image::new("images/ricardo_power.png")?
-        .crop(250, 86, 150, 100)
-        ;
-    //let img_ref = Image::new("images/half.png")?;
-
-    let img = img_ref.gaussian_noise(0.05)?;
-
-    img.save("noisy.png")?;
+    // parameters
+    let dist_radius = 10;
+    let radius = 2;
+    let tau = 0.03;
+    let tresh = 0.1;
     
-    println!("Image shape: {:?}", img.0.shape());
-    println!("w {}  h {}", img.w(), img.h());
-    let diam = 2*radius+1; 
-   
-    let patches = img.patches(radius);
-    let mat_patches_shape = (img.len(), diam*diam);
+    let diam = 2*radius+1;
+
+    let w = img_noisy.w();
+    let h = img_noisy.h();
+    let im_len = img_noisy.len();
+    let pa_len = diam*diam;
+
+    
+
+    
+    
+    let patches = img_noisy.patches(radius);
+    let mat_patches_shape = (im_len, pa_len);
     let patch_mean = patches.mean_axis(Axis(0)).unwrap();
 
-    println!("shape patches {:?}", patches.shape());
     let patches_centered = patches - patch_mean.broadcast(mat_patches_shape).unwrap();
+    
     let c = patches_centered.t().dot(&patches_centered);
-
-    println!("shape c {:?}", c.shape());
-
     let (eig_values_complex, eig_vecs_complex) = Eig::eig(&c)?;
-
-    println!("EIGVEC SHAPE: {:?}", eig_vecs_complex.shape());
     
     let eig_values_real = eig_values_complex.map(|c| c.re);
     let eig_vecs_real = eig_vecs_complex.map(|c| c.re);
 
-    //    let mut eig_tuples = eig_values_real.iter().zip(eig_vecs_real.iter())
-    //      .collect::<Vec<_>>();
-    let mut eig_tuples = (0..diam*diam).map(|i| (eig_values_real[i], eig_vecs_real.column(i).to_owned())).collect::<Vec<_>>();
+    let mut eig_tuples = (0..pa_len).map(|i| (eig_values_real[i], eig_vecs_real.column(i).to_owned())).collect::<Vec<_>>();
     
     eig_tuples.sort_by(|(val1, vec1), (val2, vec2)| val2.partial_cmp(val1).unwrap());
 
-    let total_val: f32 = eig_values_real.iter().sum();
-    let treshold = total_val/50.;
-    let mut dim = diam*diam;
+    let total_val: float = eig_values_real.iter().sum();
+    let treshold = total_val*tresh;
+    let mut dim = pa_len;
     let mut sum_val = total_val;
-    for i in 0..(diam*diam)
+    for i in 0..pa_len
     {
         if sum_val <= treshold
         {
@@ -288,97 +291,150 @@ fn main() -> Result<(), Error>
         }
     }
 
-    println!("Subspace dim={}", dim);
+    //println!("Subspace dim={}", dim);
     let (vals, vecs): (Vec<_>, Vec<_>) = eig_tuples.into_iter().take(dim).unzip();
 
-    let subspace_raw = vecs.iter().map(|vec| vec.iter()).flatten().cloned().collect::<Vec<f32>>();
-    let subspace = Array2::from_shape_vec((dim, diam*diam), subspace_raw)?;
+    let subspace_raw = vecs.iter().map(|vec| vec.iter()).flatten().cloned().collect::<Vec<float>>();
+    let subspace = Array2::from_shape_vec((dim, pa_len), subspace_raw)?;
 
 
-
-    println!("SUBSPACE MATRIX SHAPE: {:?}", subspace.shape());
+    //println!("SUBSPACE MATRIX SHAPE: {:?}", subspace.shape());
 
     let projection = patches_centered.dot(&subspace.t());
-
-    println!("Projection (H) shape: {:?}", projection.shape());
-
-    let projection_reshaped = projection.into_shape((img.h(), img.w(), dim))?;
+ 
     
+    //println!("Projection (H) shape: {:?}", projection.shape());
+
+    let projection_reshaped = projection.into_shape((h, w, dim))?;
     
+    /*
     for i in 0..dim
     {
-        let layer = projection_reshaped.select(Axis(2), &[i]).into_shape((img.h(), img.w()))?;
+        let layer = projection_reshaped.select(Axis(2), &[i]).into_shape((h, w))?;
         Image(layer).save(&format!("layer{}.png", i));
     }
+     */
 
     
-    println!("Projection reshaped into {:?}", projection_reshaped.shape());
-
     let pixel_process = |i0, j0|
     {
         let patch = projection_reshaped.select(Axis(0), &[j0]).select(Axis(1), &[i0]);
         let x0 = i0.max(dist_radius) - dist_radius;
         let y0 = j0.max(dist_radius) - dist_radius;
 
-        let x1 = (i0+dist_radius+1).min(img.w());
-        let y1 = (j0+dist_radius+1).min(img.h());
+        let x1 = (i0+dist_radius+1).min(w);
+        let y1 = (j0+dist_radius+1).min(h);
         
         let x = (x0..x1).collect::<Vec<_>>();
         let y = (y0..y1).collect::<Vec<_>>();
         let selection = projection_reshaped.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice())
             - patch.broadcast((y.len(), x.len(), dim)).unwrap();
 
-        let dist = (selection.fold_axis(Axis(2), 0f32, |sum, x| sum+x*x) / ((diam*diam) as f32));
+        let dist = (selection.fold_axis(Axis(2), 0., |sum, x| sum+x*x) / (pa_len as float));
         let prekernel = dist.map(|x| (-x/(2.0*tau*tau)).exp());
         let norm = prekernel.sum();
         let kernel = prekernel/norm;
 
-        let im_selec = img.0.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice());
+        let im_selec = img_noisy.0.select(Axis(0), y.as_slice()).select(Axis(1), x.as_slice());
         let pix = (kernel.clone()*im_selec).sum(); 
         (dist, kernel, pix)
         
     };
-    
-    let denoized = Image(Array2::from_shape_fn(
-        (img.h(), img.w()),
-        |(j0, i0)|
-        {
-            pixel_process(i0, j0).2
-        }
-    ));
 
-
-    let dist_sum = Image(Array2::from_shape_fn(
-        (img.h(), img.w()),
-        |(j0, i0)|
-        {
-            pixel_process(i0, j0).0.sum()/( (diam*diam) as f32)
-        }
-    ));
-
-    dist_sum.hyper_sample(8).save("dist_sum.png");
-    
-    for i in 0..img.w()
+    if true
     {
-        for j in 0..img.h()
-        {
-            let (dist, ker, pix) = pixel_process(i, j);
-            /*println!("dist ker {} {}", i, j);
-            println!("{:?}", dist);
-            println!("{:?}", ker);
-             */
-            Image(dist).save(&format!("test/dist_i{}j{}.png", i, j));
-            Image(ker).save(&format!("test/ker_i{}j{}.png", i, j));
-        }
+        let n_threads = 16;
+        let pas = w / n_threads;
+        let rest = w % n_threads;
+
+        let indices = (0..n_threads)
+            .collect::<Vec<usize>>();
+        let mut img_parts = indices
+            .par_iter()
+            .map(|k|
+                 {
+                     (
+                         k,
+                         Image(Array2::from_shape_fn(
+                             (h, pas),
+                             |(j0, i0)|
+                             {
+                                 pixel_process(i0+k*pas, j0).2
+                             }
+                         )))
+                 })
+            .collect::<Vec<_>>();
+        img_parts.sort_by(|(k1, part1), (k2, part2)| k1.cmp(k2));
+        let multithreaded = img_parts.iter().fold(Image::empty(0, h), |acc, part| acc.concat(&part.1));
+
+        let multi2 = multithreaded.concat(
+            &Image(Array2::from_shape_fn(
+                (h, rest),
+                |(j0, i0)|
+                {
+                    pixel_process(i0+w-rest, j0).2
+                }
+            )));
+        Ok(multi2)
+
     }
-    println!("{:?}", denoized);
-    println!("OUTPUT SHAPE {:?}", denoized.0.shape());
+    else
+    {
+        
+        let denoized = Image(Array2::from_shape_fn(
+            (h, w),
+            |(j0, i0)|
+            {
+                pixel_process(i0, j0).2
+            }
+        ));
 
-    denoized.save("test.png");
+        Ok(denoized)
+    }
+}
 
-    println!("SNR DENOIZED: {}", denoized.snr(&img_ref));
-    println!("SNR NOISY   : {}", img.snr(&img_ref));
 
+
+
+fn main() -> Result<(), Error>
+{
+
+    let mut sum_snr_denoised = 0.0;
+    let mut sum_snr_noisy = 0.0;
+/*
+    let img_ref = Image::new("images/ricardo_power_post.png")?
+        .crop(250, 86, 150, 100)
+        ;
+     */
+
+    
+    let img_ref = Image::new("images/toits.jpg")?
+        .crop(128, 100, 120, 128)
+        ;
+
+    let noise_level = 0.06;
+    let ref_power = img_ref.0.map(|x| x*x).sum().sqrt();
+    let theoric_noisy_snr = 20.0*(ref_power/(noise_level*2.0)).log10();
+
+    println!("Theoric snr: {}", theoric_noisy_snr);
+
+    for i in 0..10
+    {
+
+        let img_noisy = img_ref.gaussian_noise(noise_level)?;
+        let denoized = nlmean(&img_noisy, &img_ref)?;
+        
+        let snr_denoised = denoized.snr(&img_ref);
+        let snr_noisy = img_noisy.snr(&img_ref);
+
+        img_noisy.save(&format!("output/noisy_{:0<3}.png", i));
+        denoized.save(&format!("output/denoi_{:0<3}.png", i));
+        img_ref.concat(&img_noisy).concat(&denoized).save(&format!("output/all_{:0<3}.png", i));
+        sum_snr_denoised += snr_denoised;
+        sum_snr_noisy += snr_noisy;
+        
+        println!("|{:12}|{:12}|{:12}|{:12}|", sum_snr_denoised, sum_snr_noisy, snr_denoised, snr_noisy);
+    }
 
     
     Ok(())
