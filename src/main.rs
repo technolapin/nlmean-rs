@@ -1,7 +1,7 @@
 use image::{ImageBuffer};
 use image::{Luma};
 
-use ndarray::{Array2, Axis};
+use ndarray::{Array1, Array2, Axis};
 use rand_distr::{Distribution, Normal};
 use ndarray_linalg::*;
 use rayon::iter::IntoParallelRefIterator;
@@ -239,6 +239,8 @@ fn range2d(istart: isize, jstart: isize, iend: isize, jend: isize) -> Vec<(isize
 }
 
 
+
+
 fn nlmean(img_noisy: &Image, img_ref: &Image) -> Result<Image, Error>
 {
     // parameters
@@ -264,17 +266,9 @@ fn nlmean(img_noisy: &Image, img_ref: &Image) -> Result<Image, Error>
 
     let patches_centered = patches - patch_mean.broadcast(mat_patches_shape).unwrap();
     
-    let c = patches_centered.t().dot(&patches_centered);
-    let (eig_values_complex, eig_vecs_complex) = Eig::eig(&c)?;
+    let (eig_values, eig_vecs) = pca(patches_centered.clone())?;
     
-    let eig_values_real = eig_values_complex.map(|c| c.re);
-    let eig_vecs_real = eig_vecs_complex.map(|c| c.re);
-
-    let mut eig_tuples = (0..pa_len).map(|i| (eig_values_real[i], eig_vecs_real.column(i).to_owned())).collect::<Vec<_>>();
-    
-    eig_tuples.sort_by(|(val1, vec1), (val2, vec2)| val2.partial_cmp(val1).unwrap());
-
-    let total_val: float = eig_values_real.iter().sum();
+    let total_val: float = eig_values.iter().sum();
     let treshold = total_val*tresh;
     let mut dim = pa_len;
     let mut sum_val = total_val;
@@ -287,12 +281,11 @@ fn nlmean(img_noisy: &Image, img_ref: &Image) -> Result<Image, Error>
         }
         else
         {
-            sum_val -= eig_values_real[i];
+            sum_val -= eig_values[i];
         }
     }
 
-    //println!("Subspace dim={}", dim);
-    let (vals, vecs): (Vec<_>, Vec<_>) = eig_tuples.into_iter().take(dim).unzip();
+    let vecs = eig_vecs.into_iter().take(dim).collect::<Vec<_>>();
 
     let subspace_raw = vecs.iter().map(|vec| vec.iter()).flatten().cloned().collect::<Vec<float>>();
     let subspace = Array2::from_shape_vec((dim, pa_len), subspace_raw)?;
@@ -395,6 +388,266 @@ fn nlmean(img_noisy: &Image, img_ref: &Image) -> Result<Image, Error>
 
 
 
+enum Tree
+{
+    Leaf(Vec<usize>),
+    Node(Box<Tree>, Box<Tree>),
+}
+
+
+fn pca(patches_centered: Array2<float>) -> Result<(Vec<float>, Vec<Array1<float>>), Error>
+{
+
+    let pa_len = patches_centered.ncols();
+    
+    let c = patches_centered.t().dot(&patches_centered);
+    let (eig_values_complex, eig_vecs_complex) = Eig::eig(&c)?;
+    
+    let eig_values_real = eig_values_complex.map(|c| c.re);
+    let eig_vecs_real = eig_vecs_complex.map(|c| c.re);
+
+    let mut eig_tuples = (0..pa_len).map(|i| (eig_values_real[i], eig_vecs_real.column(i).to_owned())).collect::<Vec<_>>();
+    
+    eig_tuples.sort_by(|(val1, vec1), (val2, vec2)| val2.partial_cmp(val1).unwrap());
+
+    let tuple: (Vec<_>, Vec<_>) = eig_tuples.into_iter().unzip();
+    
+    Ok(tuple)
+    
+}
+
+
+impl Tree
+{
+    fn ham_sandwich(patches: &Array2<float>, indices: Vec<usize>, goal: usize) -> Self
+    {
+        let cut = |patches_indices: Vec<usize>|
+        {
+            // (u-m)*d
+            let selection = patches.select(Axis(0), patches_indices.as_slice());
+            let mean = selection.mean_axis(Axis(0)).unwrap();
+            let n = patches_indices.len();
+            let dim = patches.ncols();
+            let centered = selection - mean.broadcast((n, dim)).unwrap();
+            let (vals, vecs) = pca(centered.clone()).unwrap();
+            let axe = &vecs[0];
+//            let dots = centered.dot(&axe.t());
+
+//            println!("DOTs SHAPES {:?}", dots.shape());
+            
+            let (front, back): (Vec<usize>, Vec<usize>) =
+                patches_indices
+                .iter()
+                .partition(|&&i|
+                           {
+                               //let dot = dots[[*i]];
+                               let dot = (patches.row(i).to_owned() - mean.clone()).dot(axe);
+                               dot >= 0.0
+                           }
+                );
+            
+            (front, back)
+        };
+
+
+        if indices.len() <= goal
+        {
+            Tree::Leaf(indices)
+        }
+        else
+        {
+            let (front, back) = cut(indices);
+            Self::Node(
+                Box::new(Self::ham_sandwich(patches, front, goal)),
+                Box::new(Self::ham_sandwich(patches, back, goal))
+            )
+        }
+    }
+
+    fn leafs(self) -> Vec<Vec<usize>>
+    {
+        let mut trees = vec![self];
+        let mut leafs = vec![];
+
+        while let Some(tree) = trees.pop()
+        {
+            match tree
+            {
+                Tree::Leaf(leaf) => leafs.push(leaf),
+                Tree::Node(front, back) => {trees.push(*front); trees.push(*back)}
+            }
+        }
+
+
+        leafs
+    }
+    
+}
+
+
+
+
+fn nlmean_ham(img_noisy: &Image, img_ref: &Image) -> Result<Image, Error>
+{
+    // parameters
+    let partitioning = 100;
+    let radius = 3;
+    let tau = 0.05;
+    let tresh = 0.1;
+    
+    let diam = 2*radius+1;
+
+    let w = img_noisy.w();
+    let h = img_noisy.h();
+    let im_len = img_noisy.len();
+    let pa_len = diam*diam;
+
+    
+
+    
+    
+    let patches = img_noisy.patches(radius);
+    let mat_patches_shape = (im_len, pa_len);
+    let patch_mean = patches.mean_axis(Axis(0)).unwrap();
+
+    let patches_centered = patches.clone() - patch_mean.broadcast(mat_patches_shape).unwrap();
+
+
+    let (eig_values, eig_vecs) = pca(patches_centered.clone())?;
+    
+    let total_val: float = eig_values.iter().sum();
+    let treshold = total_val*tresh;
+    let mut dim = pa_len;
+    let mut sum_val = total_val;
+    for i in 0..pa_len
+    {
+        if sum_val <= treshold
+        {
+            dim = i;
+            break;
+        }
+        else
+        {
+            sum_val -= eig_values[i];
+        }
+    }
+
+    let vecs = eig_vecs.into_iter().take(dim).collect::<Vec<_>>();
+    
+    let subspace_raw = vecs.iter().map(|vec| vec.iter()).flatten().cloned().collect::<Vec<float>>();
+    let subspace = Array2::from_shape_vec((dim, pa_len), subspace_raw)?;
+
+
+    //println!("SUBSPACE MATRIX SHAPE: {:?}", subspace.shape());
+
+    let projection = patches_centered.dot(&subspace.t());
+ 
+    
+    //println!("Projection (H) shape: {:?}", projection.shape());
+
+    
+
+    
+    
+    let mut patches_indices = (0..im_len).collect::<Vec<usize>>();
+
+    let tree = Tree::ham_sandwich(&patches, patches_indices, partitioning);
+
+    let leafs = tree.leafs();
+
+    let mut zones = Array1::default((im_len));
+
+    println!("nb of leafs: {}", leafs.len());
+    for (zone, leaf) in leafs.iter().enumerate()
+    {
+        println!("{}", leaf.len());
+        for i in leaf
+        {
+            zones[[*i]] = (zone as float)/(leafs.len() as float);
+        }
+    }
+
+    Image::from_mat(zones.into_shape((h, w))?).save("zones.png");
+    
+    
+
+    
+    let flat_img = img_noisy.0.clone().into_shape((im_len))?;
+
+    let mut denoised_flat = Array1::default((im_len));
+    /*
+    for leaf in leafs.iter()
+    {
+
+        // selection of the closest looking patches
+        let selection = projection.select(Axis(0), leaf.as_slice());
+        let im_selec = flat_img.select(Axis(0), leaf.as_slice());
+
+        let sel_len = selection.len();
+        for &i in leaf.iter()
+        {
+            let patch = projection.row(i).to_owned();
+            let diff = selection.clone() - patch;
+            let dist = (diff.fold_axis(Axis(1), 0., |sum, x| sum + x*x)) / (pa_len as float);
+            let prekernel = dist.map(|x| (-x/(2.0*tau*tau)).exp());
+            let norm = prekernel.sum();
+            let kernel = prekernel/norm;
+            
+            let pix = (kernel.clone()*im_selec.clone()).sum();
+            denoised_flat[[i]] = pix;
+        }
+    }
+     */
+    let parts = leafs.par_iter()
+        .map(
+            |leaf|
+            {
+                // selection of the closest looking patches
+                let selection = projection.select(Axis(0), leaf.as_slice());
+                let im_selec = flat_img.select(Axis(0), leaf.as_slice());
+
+                let mut pixels = vec![];
+                
+                let sel_len = selection.len();
+                for &i in leaf.iter()
+                {
+                    let patch = projection.row(i).to_owned();
+                    let diff = selection.clone() - patch;
+                    let dist = (diff.fold_axis(Axis(1), 0., |sum, x| sum + x*x)) / (pa_len as float);
+                    let prekernel = dist.map(|x| (-x/(2.0*tau*tau)).exp());
+                    let norm = prekernel.sum();
+                    let kernel = prekernel/norm;
+                    
+                    let pix = (kernel.clone()*im_selec.clone()).sum();
+                    pixels.push(pix);
+                }
+                pixels
+            }).collect::<Vec<_>>();
+
+    for (indices, pixels) in leafs.iter().zip(parts.iter())
+    {
+        for (i, pix) in indices.iter().zip(pixels.iter())
+        {
+            denoised_flat[[*i]] = *pix;
+        }
+    }
+
+    let denoized = Image::from_mat(denoised_flat.into_shape((h, w))?);
+
+    /*
+        let denoized = Image(Array2::from_shape_fn(
+            (h, w),
+            |(j0, i0)|
+            {
+                pixel_process(i0, j0).2
+            }
+        ));
+*/
+        Ok(denoized)
+}
+
+
+
 
 fn main() -> Result<(), Error>
 {
@@ -422,7 +675,7 @@ fn main() -> Result<(), Error>
     {
 
         let img_noisy = img_ref.gaussian_noise(noise_level)?;
-        let denoized = nlmean(&img_noisy, &img_ref)?;
+        let denoized = nlmean_ham(&img_noisy, &img_ref)?;
         
         let snr_denoised = denoized.snr(&img_ref);
         let snr_noisy = img_noisy.snr(&img_ref);
