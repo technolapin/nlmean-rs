@@ -385,7 +385,7 @@ impl Tree
     }
 
 
-    fn hybrid(patches: &Array2<Float>, indices: Vec<usize>, goal: usize) -> Self
+    fn build_hybrid(patches: &Array2<Float>, indices: Vec<usize>, goal: usize) -> Self
     {
         if indices.len() <= goal
         {
@@ -394,13 +394,13 @@ impl Tree
         else
         {
             let (inner, outer) = Self::centered_cut(patches, indices);
-            let (out_for, out_bac) = Self::random_cut(patches, outer);
+            let (out_for, out_bac) = Self::pca_cut(patches, outer);
             Self::Node(
                 Box::new(Self::Leaf(inner)),
                 Box::new(
                     Self::Node(
-                        Box::new(Self::hybrid(patches, out_for, goal)),
-                        Box::new(Self::hybrid(patches, out_bac, goal))
+                        Box::new(Self::build_hybrid(patches, out_for, goal)),
+                        Box::new(Self::build_hybrid(patches, out_bac, goal))
                         )
                     )
                 )
@@ -456,7 +456,7 @@ const PATCHES_RADIUS: usize = 2;
 const TAU: Float = 0.03;
 const PCA_TRESHOLD: Float = 0.1;
 const PARTITIONING_GOAL: usize = 500;
-const zones_PATCHES_RADIUS: isize = 2;
+const RADIUS_LOCAL_FUSION: isize = 1;
 
 /**
 This is a simple implementation of the NLmean algorithm.
@@ -838,7 +838,7 @@ fn nlmean_ham_local(img_noisy: &Image) -> Result<Image, Error>
     {
         let x = (i % w) as isize;
         let y = (i / w) as isize;
-        range2d(x-zones_PATCHES_RADIUS, y-zones_PATCHES_RADIUS, x+1+zones_PATCHES_RADIUS, y+1+zones_PATCHES_RADIUS)
+        range2d(x-RADIUS_LOCAL_FUSION, y-RADIUS_LOCAL_FUSION, x+1+RADIUS_LOCAL_FUSION, y+1+RADIUS_LOCAL_FUSION)
             .iter()
             .map(|&(x, y)| x as usize + (y as usize*w))
             .filter_map(|i| zones.get([i]))
@@ -960,7 +960,7 @@ fn main() -> Result<(), Error>
     let steps = 10;
     let mut chronos = vec![];
 
-    let mut all_outputs = Image::empty(6*img_ref.w(), 0);
+    let mut all_outputs = Image::empty(9*img_ref.w(), 0);
         
     for i in 1..=steps
     {
@@ -973,16 +973,22 @@ fn main() -> Result<(), Error>
         chrono.record();
         let den2 = nlmean_tree(&img_noisy, Tree::build_pca)?;
         chrono.record();
-        let den22 = nlmean_tree(&img_noisy, Tree::hybrid)?;
+        let den3 = nlmean_tree(&img_noisy, Tree::build_hybrid)?;
         chrono.record();
-        let den3 = nlmean_tree(&img_noisy, Tree::build_sandwich)?;
+        let den4 = nlmean_tree(&img_noisy, Tree::build_random)?;
+        chrono.record();
+        let den5 = nlmean_tree(&img_noisy, Tree::build_sandwich)?;
+        chrono.record();
+        let den6 = nlmean_ham_fuse(&img_noisy)?;
+        chrono.record();
+        let den7 = nlmean_ham_local(&img_noisy)?;
         chrono.record();
 
         chronos.push(chrono.string());
 //        chrono.print();
         
         let denoizeds = vec![
-            den1, den2, den22, den3
+            den1, den2, den3, den4, den5, den6, den7
         ];
 
         let snr_denoizeds = denoizeds.iter()
@@ -1012,15 +1018,7 @@ fn main() -> Result<(), Error>
 
             
             
-//        sum_snr_denoised += snr_denoised;
-  //      sum_snr_noisy += snr_noisy;
-        
-        //   println!("|{:12}|{:12}|{:12}|{:12}|", sum_snr_denoised, sum_snr_noisy, snr_denoised, snr_noisy);
-
-            
     }
-
-    println!("DIIMSSS {} {}", all_outputs.w(), all_outputs.h());
     
     all_outputs.save("output/all_all.png")?;
     

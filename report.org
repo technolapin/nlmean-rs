@@ -1,0 +1,179 @@
+#+TITLE: Rapport de Projet
+
+* Introduction
+Les images sont souvent parasités par du bruit, qui est défini par n'ayant pas de signification dans le contexte d'intérprétation du signal.
+L'un de ces bruits les plus courants, le bruit gaussien, est présent sur les photographies avec une intensité dépendante des conditions de capture de l'image et de la qualité de l'appareil.
+Il est parfois intéressant de diminuer le bruit d'une image, afin de mieux percevoir l'information utile de l'image.
+Une approche classique pour débruiter une image est de supprimer les hautes fréquences en moyennant les pixels entre eux, comme par exemple avec une convolution avec un noyau gaussien, ou encore de retirer directement ces hautes fréquences via une analyse spectrale de l'image, par FFT ou ondelettes.
+Cette approche retire le bruit de haute fréquence, mais aussi les détails abrupts de l'image, comme les bordures qui se retrouvent floutés car un changement net d'intensité est une variation de haute fréquence.
+D'autres approches sont alors explorées, afin de nullifier le bruit de haute fréquence sans pour autant perdre les fortes variations d'intensité de l'image.
+
+* L'algorithme NL mean
+** Le principe et les limites
+   Le principe est toujours de moyenner des pixels entre eux, mais l'idée est de moyenner les pixels venants de zones de l'images qui se ressemblent.
+
+   On découpe l'image en patches (par défaut carrés de rayon fixe) centrés sur chaque pixel de l'image.
+
+   Pour chaque pixel, on fait la somme avec tous les autres pixels de l'image pondérés par une gaussienne de la distance entre les patches.
+   C'est à dire, pour une image I de n pixels découpés en un ensemble de patches P, on a l'image I':
+
+   $$I'(i) = \frac{\sum_{j}I(j)e^{- \frac{\| P(i) - P(j) \|^2}{2\sigma^2}}}{\sum_{j}e^{- \frac{\| P(i) - P(j) \|^2}{2\sigma^2}}}$$
+
+   On va donc moyenner les pixels de l'image dont les voisinages sont similaires, ce qui en pratique permet de conserver les fortes variations d'intensités de l'image sans pour autant retirer trop d'efficacité au débruitage.
+   
+   Une chose saute aux yeux: la complexité en O(n²) de l'algorithme.
+   L'enjeu va donc être de restreindre le nombre de sommes sans pour autant perdre l'efficacité de l'algorithme.
+   
+** Les solutions
+
+   Une première solution et de rendre cet algorithme de nouveau local, en limitant les patches contribuant à un pixel à un voisinage fixe autour de lui.
+   On perds alors la puissance de la non-localité de l'algorithme de base, car plus on a d'occurences du même motif, meilleur sera le résultat. Néanmoins, les images naturelles ne répartis pas uniformément les motifs, et donc la plupart du temps, l'image se traîte assez bien avec un voisinage fixe de patches.
+   On pourrait aussi trouver des moyens plus intelligent de choisir les pixels à sommer, ou alors encore utiliser une Image intégrale et une FFT afin de calculer plus rapidement les distances [1]
+
+   Une autre chose faite en complément est de projeter les patches de tailles $(2r+1)^2$ sur un sous-espace de dimension moindre, afin de baisser les coûts de calcul.
+   En TP et dans la littérature, cela se fait par analyse spectrale de la matrice de covariance des patches, qui permet d'obtenir une base dans la participation de chaque direction au signal est connue, et on peut donc choisir de garder uniquement un nombre fixe de plus importantes dirrections, ou encore d'en garder autant qu'il le fait pour récupérer une fraction de l'intensité totale (ce que je fais pour éviter de m'adapter aux images).
+
+   
+   
+   
+   
+   
+* Ma tentative
+** Idée
+   Une piste pour améliorer cet algorithme serait de trouver un meilleur moyen de choisir les pixels à moyenner. Un voisinage géométrique fixe est souvent suffisant, mais on observe souvent qu'une partie non négligeable des pixels du voisinage ne contribuent pas à la somme car leurs voisinages sont trop différents.
+   L'idée est de ne plus choisir les patches à comparer avec un voisinage fixe, mais de segmenter l'espace des patches de façon à rassembler les patches proches et permettre d'avoir un assortiment plus pertinnent de patches pour chaque pixel.
+   En effet, les patches ne sont pas répartis uniformément dans leur espace, et séparer les patches en pôles de densité forte semble être assez intéressant.
+   On peut espérer avoir un meilleur résultat ou une baisse de la complexité de calcul. Enfin franchement, étant donné le temps accordé à ce projet, un résultat presque aussi bien que l'algorithme de base seraît déjà un bon début.
+
+   Évidement, je ne travaille pas sur les patches entiers, mais sur leur projections sur un sous-espace comme détaillé plus haut.
+   Je détaille par la suite diverses approches de segmentation en arbre binaire de l'espace.
+** Construire les arbres 
+*** Tentative PCA
+
+   Parce que j'utilise une PCA pour réduire la dimension des patches, j'ai émis l'hypothèse qu'une séparation de points par un hyperplan normal au vecteur le plus important de la répartition des patches dans leur espace et passant par le barycentre puisse être suffisant.
+   Voici l'idée illustrée en 2D:
+   [[./graphics/pca.png]]
+
+   On sépare les patches en 2 sous-ensemble, puis on les resépare récursivement jusqu'à atteindre un certain nombre de points.   
+
+   En pratique, les images comportent beaucoup de patches proches du barycentre (notamment ceux des zones d'applats), et des séparations abusives arrivent assez rapidement.
+
+   Voici à quoi ressemblent les feuilles de l'arbre obtenues, représentées en niveau de gris:
+   [[./graphics/zones.png]]
+
+   On observe comme prévus beaucoup de séparations abusive dans les zones de faible variation:
+   (à gauche, l'image traitée par l'algorithme de base, à droite, par l'algorithme pca)
+   [[./graphics/pca_comp.png]]
+
+*** Tentative "hybride"
+
+   Les points centraux se faisant trop séparer à mon goût, j'ai tenté une modification: à chaque récursion, j'extrait d'abord les points centraux avec une balle centrée au barycentre, puis je scinde le reste avec une coupe pca.
+   Pour bien choisir le rayon, je fait un histogramme de la norme des points recentrés, et je cherche le premier minimum local (signe de baisse de densité à la frontière et donc qu'on intersecte probablement peu de pôles de forte densité).
+   
+   [[./graphics/hybrid.png]]
+
+   Comparé à une approche pca pour les mêmes paramètres, on obtient une nette amélioration:
+   
+   [[./graphics/hybrid_comp.png]]
+   
+   
+*** Tentative aléatoire
+   Une autre méthode que j'ai essayé est de générer des hyperplans aléatoirement à partir des points de l'ensemble à subdiviser, puis de garder le meilleur,
+   c'est à dire celui qui minimise $$|n_{right} - n_{left}|$$ .
+
+   [[./graphics/random.png]]
+
+   [[./graphics/random_out.png]]
+
+   
+*** Tentative du sandwitch au jambon
+
+   J'ai décidé d'appliquer une méthode que j'ai déjà vue dans le contexte de diminution de complexité d'un ensemble de points avec conservation de l'information de densité qui utilisait le théorème du sandwich au Jambon.
+   Ce théorème stipule que pour tout espace de dimension n, tout ensemble de points colorié en n couleurs différentes peut être scindé équitablement couleur par couleur par un unique hyperplan.
+   Cette propritété est utilisée par Matheny, Michael & Phillips et Jeff. pour construire un arbre de partitionnement de l'espace à moindre coût (en fesant une première séparation triviale, puis en reséparant les deux moitiées avec un seul hyperplan), afin d'obtenir un arbre qui ressemble à ce que je cherche.
+   En effet, ils ont pour objectif d'obtenir un arbre dont chaque feuille pourrait être représentée par un seul de leur points, ce qui devraît être adapté à mon approche.
+
+   Le résultat est identique à la tentative aléatoire, mais je pense que c'est dû à de mauvais réglages de ma part, je n'ai pas eu le temps de me pencher plus avant sur la question.
+
+** Résoudre les mauvaises ségmentations
+   Le point commun qu'ont toutes ces méthodes est la sursegmentation de certains ensemble de patches, menant à des discontunitées là où il ne devrait pas y en avoir.
+
+   J'ai donc pensé à fusionner à postériori les ensembles qui n'auraient pas dû être segmentés.
+   J'ai tenté deux approches:
+   + comparer des moyennes approximatives des différents ensemble de points
+   + ne plus travailler au seins d'un sous-ensemble de points, mais aussi inclure ceux qui sont voisins géographiquement et ensuite faire une fusion comme dans l'approche précédente
+
+
+   Je n'ai pas eu le temps de beaucoup explorer cette voie, et je ne l'es ai testés que pour l'approche PCA.
+   
+
+* Résultats
+
+  Je n'ai pas eu énormément le temps de jouer sur les paramètres, mais voici une comparaison de toutes les approches citées avec un bruit gaussien d'intensité croissante.
+
+  [[./graphics/all_legend.png]]
+
+  
+
+#+BEGIN_SRC gnuplot :var  data=snrs :file images/snrs.png :export results
+  set title "snrs"
+  set style data histogram
+  set xlabel "sigma"
+  set ylabel "SNR"
+  set auto x
+  set xtics ("0.01" 0,"0.02" 1,"0.03" 2,"0.04" 3,"0.05" 4,"0.06" 5,"0.07" 6,"0.08" 7,"0.09" 8,"0.1" 9)
+  plot data using 1 with lp title 'theoric',data using 2 with lp title 'normal NL', data using 3 with lp title 'pca', data using 4 with lp title 'hybrid', data using 5 with lp title 'random', data using 6 with lp title 'ham', data using 7 with lp title 'fuse mean', data using 8 with lp title 'fuse local'
+
+  #+END_SRC
+
+#+RESULTS:
+[[file:images/snrs.png]]
+
+#+BEGIN_SRC gnuplot :var  data=temps :file images/temps.png :export results
+  set title "Temps d'exécution"
+  set style data histogram
+  set xlabel "sigma"
+  set ylabel "temps (s)"
+  set auto x
+  set xtics ("0.01" 0,"0.02" 1,"0.03" 2,"0.04" 3,"0.05" 4,"0.06" 5,"0.07" 6,"0.08" 7,"0.09" 8,"0.1" 9)
+  plot data using 1 with lp title 'normal NL', data using 2 with lp title 'pca', data using 3 with lp title 'hybrid', data using 4 with lp title 'random', data using 5 with lp title 'ham', data using 6 with lp title 'fuse mean', data using 7 with lp title 'fuse local'
+
+  #+END_SRC
+
+  #+RESULTS:
+  [[file:images/temps.png]]
+
+  J'ai exclus le sigma=0.01 du tracé du temps d'exécution car la méthode hybride y explose, ce qui rend le reste du graphique peu intéressant.
+  
+* Bibliographie
+  
+1. J. Wang, Y. Guo, Y. Ying, Y. Liu and Q. Peng, "Fast Non-Local Algorithm for Image Denoising," 2006 International Conference on Image Processing, Atlanta, GA, USA, 2006, pp. 1429-1432, doi: 10.1109/ICIP.2006.312698.
+2. Matheny, Michael & Phillips, Jeff. (2018). Practical Low-Dimensional Halfspace Range Space Sampling. 
+3. https://www.college-de-france.fr/media/pierre-louis-lions/UPL67973_Jean_Michel_MorelTransparents.pdf
+
+* data not for export                                              :noexport:
+
+  #+NAME: temps
+  | 0.3224 | 0.1631 | 0.8578 | 0.2321 | 0.2923 | 0.1119 | 1.0649 |
+  | 0.2588 | 0.1639 | 1.0439 | 0.2879 | 0.3727 | 0.1146 | 1.4383 |
+  | 0.3123 | 0.1768 | 1.2840 | 0.2733 | 0.3295 | 0.1200 | 2.0479 |
+  | 0.3249 | 0.1830 | 1.1056 | 0.2654 | 0.2931 | 0.1007 | 1.8473 |
+  | 0.3213 | 0.2325 | 1.7545 | 0.2907 | 0.3748 | 0.1254 | 2.3256 |
+  | 0.3257 | 0.1709 | 1.1107 | 0.2576 | 0.3107 | 0.0980 | 1.8480 |
+  | 0.3658 | 0.1859 | 1.0997 | 0.2745 | 0.3280 | 0.1070 | 1.6592 |
+  | 0.4174 | 0.2058 | 2.5419 | 0.3239 | 0.3842 | 0.1269 | 1.3568 |
+  | 0.4593 | 0.2269 | 1.7940 | 0.3402 | 0.3730 | 0.1334 | 2.2517 |
+# | 0.4505 | 0.2346 | 8.1601 | 0.3336 | 0.3798 | 0.0962 | 1.1546 |
+
+
+  #+NAME: snrs
+  |   70.7131885911777 |  66.09257974531741 |  63.29861928958322 |  63.33323947612642 |  65.06444230906227 | 65.58851826138023 | 56.598737677415734 |  62.09395218765571 |
+  |  64.66586962674536 |  65.79254942782596 |  62.96650260167257 |  63.24177882492074 |  64.29724603249768 | 64.38401944660099 |  56.74271671357271 |   60.0600678873743 |
+  |   61.1801984607509 |  65.53909141031909 |  63.13960373814558 |  63.37881614089716 | 63.650308877130364 | 63.66584213729347 |  56.25504815219987 |  59.54404009326545 |
+  |  58.63767364000326 |  64.92150603711274 | 62.736809302406336 |  63.04804035572894 |  63.08269090204236 | 63.07576931140369 |  56.16868740322015 | 58.285350591671005 |
+  | 56.656060109451836 |  63.77737931751197 |  61.95478200067001 |   62.4866819470033 |  61.90482321865686 | 61.87992499438244 |  55.58467540246695 |  60.45750153136089 |
+  |   55.0977391185696 | 62.080018008374964 | 60.685381705661364 |  61.42203667808956 |  60.57747535518038 | 60.47466832223782 |  55.35947721019384 | 59.424500701720945 |
+  |   53.7573252032331 | 59.982495531656106 |  58.90422472705184 |  59.74754342227753 | 58.685871528279435 | 58.60452461700912 |  54.53693326748095 |   57.2550537507872 |
+  |  52.49796344678316 |  57.60194456346576 | 57.111673980351505 |  57.88439665402436 |  56.72661386395029 | 56.45570503905005 |  54.11987603078054 |  56.81821303367607 |
+  | 51.556093233024576 |  55.35823700180656 |  55.14656618984995 | 56.250989981329276 |  54.67067537912471 | 54.50769682357314 |   53.4419658080748 |  54.49943643249036 |
+  |  50.76512391416258 |  53.26950485338671 | 53.536928513605496 |  55.00815802424083 |  52.81464376270546 | 52.47678568560913 |  52.50518728977919 |  53.82563613980228 |

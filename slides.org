@@ -1,0 +1,29 @@
+#+TITLE: Présentation
+#+AUTHOR: Clément Chomicki
+#+OPTIONS: H:2 toc:t num:t
+#+LATEX_CLASS: beamer
+#+LATEX_CLASS_OPTIONS: [presentation]
+#+BEAMER_THEME: Madrid
+#+COLUMNS: %45ITEM %10BEAMER_ENV(Env) %10BEAMER_ACT(Act) %4BEAMER_COL(Col)
+
+#+LATEX_HEADER: \usecolortheme[dark]{solarized}
+
+#+LaTeX_HEADER: \usemintedstyle[c++]{solarized-dark}
+#+LaTeX_HEADER: \usepackage{xcolor-solarized}
+
+
+* Présentation du problème
+** Suppression du bruit
+** Non-Local means
+** Améliorations potentielles
+   
+* Méthode proposée
+** Trees
+** PCA cut
+** Hybrid cut
+** Random/ham sandwich cut
+** Fusions
+   
+* Résultats
+** 
+[[./graphics/all.jpg]]
