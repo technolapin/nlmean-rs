@@ -115,7 +115,7 @@ D'autres approches sont alors explorées, afin de nullifier le bruit de haute fr
 
   
 
-#+BEGIN_SRC gnuplot :var  data=snrs :file images/snrs.png :export results
+#+BEGIN_SRC gnuplot :var  data=snrs :file graphics/snrs.png :export results
   set title "snrs"
   set style data histogram
   set xlabel "sigma"
@@ -127,9 +127,9 @@ D'autres approches sont alors explorées, afin de nullifier le bruit de haute fr
   #+END_SRC
 
 #+RESULTS:
-[[file:images/snrs.png]]
+[[file:graphics/snrs.png]]
 
-#+BEGIN_SRC gnuplot :var  data=temps :file images/temps.png :export results
+#+BEGIN_SRC gnuplot :var  data=temps :file graphics/temps.png :export results
   set title "Temps d'exécution"
   set style data histogram
   set xlabel "sigma"
@@ -141,7 +141,7 @@ D'autres approches sont alors explorées, afin de nullifier le bruit de haute fr
   #+END_SRC
 
   #+RESULTS:
-  [[file:images/temps.png]]
+  [[file:graphics/temps.png]]
 
   J'ai exclus le sigma=0.01 du tracé du temps d'exécution car la méthode hybride y explose, ce qui rend le reste du graphique peu intéressant.
   

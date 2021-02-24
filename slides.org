@@ -14,16 +14,52 @@
 
 * Présentation du problème
 ** Suppression du bruit
++ Le bruit gène
++ Moyenner des pixels
++ Perte de détails
++ Solution: mieux choisir les pixels à moyenner
 ** Non-Local means
-** Améliorations potentielles
-   
++ Patches
++ Patches différents <=> poids faible
++ Projection des patches avec une PCA
++ Sommation sur tout l'image / un voisinage
+
+** Mieux choisir les pixels sommés
++ Moins de “miss”
++ Plus de “matches”
++ Moins de pixels
+
 * Méthode proposée
-** Trees
+** Segmentation de l'espace des patches
++ Arbres
++ trouver de bonnes “cut”
 ** PCA cut
+#+attr_latex: :width 200px
+[[./graphics/pca.png]]
+
 ** Hybrid cut
-** Random/ham sandwich cut
+#+attr_latex: :width 200px
+[[./graphics/hybrid.png]]
+
+** Random / Ham sandwich
+#+attr_latex: :width 200px
+[[./graphics/random.png]]
+
 ** Fusions
-   
+#+attr_latex: :width 200px
+[[./graphics/zones.png]]
+
 * Résultats
 ** 
-[[./graphics/all.jpg]]
+#+attr_latex: :width 200px
+[[./graphics/all_legend.png]]
+** 
+[[./graphics/snrs.png]]
+** 
+[[./graphics/temps.png]]
+
+* Conclusion
+** 
++ Certaines approches sont performantes mais débruitent moins
+  => moins de perte de signal
++ Peu de temps pour jouer sur les paramètres
